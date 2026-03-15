@@ -1157,6 +1157,7 @@ export async function reindexCollection(
         const stat = statSync(filepath);
         updateDocument(db, existing.id, title, hash,
           stat ? new Date(stat.mtime).toISOString() : now);
+        await insertDocumentKo(db, collectionName, path, title, content);
         updated++;
       }
     } else {
@@ -1166,6 +1167,7 @@ export async function reindexCollection(
       insertDocument(db, collectionName, path, title, hash,
         stat ? new Date(stat.birthtime).toISOString() : now,
         stat ? new Date(stat.mtime).toISOString() : now);
+      await insertDocumentKo(db, collectionName, path, title, content);
     }
 
     processed++;
@@ -2050,8 +2052,12 @@ export function updateDocument(
  * Deactivate a document (mark as inactive but don't delete).
  */
 export function deactivateDocument(db: Database, collectionName: string, path: string): void {
+  const doc = db.prepare(
+    `SELECT id FROM documents WHERE collection = ? AND path = ? AND active = 1`
+  ).get(collectionName, path) as { id: number } | undefined;
   db.prepare(`UPDATE documents SET active = 0 WHERE collection = ? AND path = ? AND active = 1`)
     .run(collectionName, path);
+  if (doc) deleteDocumentKo(db, doc.id);
 }
 
 /**
