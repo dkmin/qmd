@@ -20,7 +20,7 @@ qmd status                        # Show index status and collections
 qmd update [--pull]               # Re-index all collections (--pull: git pull first)
 qmd embed                         # Generate vector embeddings (uses node-llama-cpp)
 qmd query <query>                 # Search with query expansion + reranking (recommended)
-qmd search <query>                # Full-text keyword search (BM25, no LLM)
+qmd search <query>                # Full-text keyword search (BM25+Korean FTS, no LLM)
 qmd vsearch <query>               # Vector similarity search (no reranking)
 qmd mcp                           # Start MCP server (stdio transport)
 qmd mcp --http [--port N]         # Start MCP server (HTTP, default port 8181)
@@ -129,15 +129,30 @@ All tests live in `test/`. Run everything:
 ```sh
 npx vitest run --reporter=verbose test/
 bun test --preload ./src/test-preload.ts test/
+
+# Korean-specific tests
+bun test test/kiwi.test.ts              # Kiwi tokenizer unit tests
+bun test test/eval-ko.test.ts           # Korean search quality evaluation (18 queries)
 ```
 
 ## Architecture
 
 - SQLite FTS5 for full-text search (BM25)
+- **Korean FTS**: Kiwi morphological analyzer (WASM) → `documents_fts_ko` FTS5 table
 - sqlite-vec for vector similarity search
 - node-llama-cpp for embeddings (embeddinggemma), reranking (qwen3-reranker), and query expansion (Qwen3)
 - Reciprocal Rank Fusion (RRF) for combining results
 - Smart chunking: 900 tokens/chunk with 15% overlap, prefers markdown headings as boundaries
+
+### Korean FTS (Kiwi)
+
+- `src/kiwi.ts`: Kiwi WASM lazy singleton, `tokenizeKo()`, `tokenizeQuery()`
+- POS tags kept: NNG (common noun), NNP (proper noun), VV (verb), VA (adjective), SL (foreign)
+- Model path: `~/.cache/qmd/models/kiwi/models/cong/base/` (override with `XDG_CACHE_HOME`)
+- `bun install kiwi-nlp` required; graceful fallback to English-only if unavailable
+- Search output shows per-source scores: `[fts:70% fts-ko:69%]`
+- Two indexing paths: `reindexCollection()` in store.ts AND `indexFiles()` in cli/qmd.ts — both call `insertDocumentKo`
+- See `user-guide.md` for setup and usage details
 
 ## Important: Do NOT run automatically
 
