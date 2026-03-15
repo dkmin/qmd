@@ -45,6 +45,7 @@ import {
   toVirtualPath,
   insertContent,
   insertDocument,
+  insertDocumentKo,
   findActiveDocument,
   updateDocumentTitle,
   updateDocument,
@@ -1552,6 +1553,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
         const stat = statSync(filepath);
         updateDocument(db, existing.id, title, hash,
           stat ? new Date(stat.mtime).toISOString() : now);
+        await insertDocumentKo(db, collectionName, path, title, content);
         updated++;
       }
     } else {
@@ -1562,6 +1564,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
       insertDocument(db, collectionName, path, title, hash,
         stat ? new Date(stat.birthtime).toISOString() : now,
         stat ? new Date(stat.mtime).toISOString() : now);
+      await insertDocumentKo(db, collectionName, path, title, content);
     }
 
     processed++;
@@ -1820,6 +1823,7 @@ type OutputRow = {
   chunkPos?: number;
   hash?: string;
   docid?: string;
+  source?: string;
   explain?: HybridQueryExplain;
 };
 
@@ -1852,6 +1856,7 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         ...(row.context && { context: row.context }),
         ...(body && { body }),
         ...(snippet && { snippet }),
+        ...(row.source && { source: row.source }),
         ...(opts.explain && row.explain && { explain: row.explain }),
       };
     });
@@ -1889,9 +1894,10 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         console.log(`${c.dim}Context: ${row.context}${c.reset}`);
       }
 
-      // Line 4: Score
+      // Line 4: Score + source
       const score = formatScore(row.score);
-      console.log(`Score: ${c.bold}${score}${c.reset}`);
+      const sourceTag = row.source ? ` ${c.dim}[${row.source}]${c.reset}` : "";
+      console.log(`Score: ${c.bold}${score}${c.reset}${sourceTag}`);
       if (opts.explain && row.explain) {
         const explain = row.explain;
         const ftsScores = explain.ftsScores.length > 0
@@ -2112,6 +2118,7 @@ async function search(query: string, opts: OutputOptions): Promise<void> {
     context: getContextForFile(db, r.filepath),
     hash: r.hash,
     docid: r.docid,
+    source: r.source,
   }));
 
   closeDb();
