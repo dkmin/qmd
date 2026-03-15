@@ -14,6 +14,7 @@ import {
   resolve,
   enableProductionMode,
   searchFTS,
+  searchFTSMerged,
   extractSnippet,
   getContextForFile,
   getContextForPath,
@@ -2086,7 +2087,7 @@ function parseStructuredQuery(query: string): ParsedStructuredQuery | null {
   return typed.length > 0 ? { searches: typed, intent } : null;
 }
 
-function search(query: string, opts: OutputOptions): void {
+async function search(query: string, opts: OutputOptions): Promise<void> {
   const db = getDb();
 
   // Validate collection filter (supports multiple -c flags)
@@ -2097,7 +2098,7 @@ function search(query: string, opts: OutputOptions): void {
   // Use large limit for --all, otherwise fetch more than needed and let outputResults filter
   const fetchLimit = opts.all ? 100000 : Math.max(50, opts.limit * 2);
   const results = filterByCollections(
-    searchFTS(db, query, fetchLimit, singleCollection),
+    await searchFTSMerged(db, query, fetchLimit, singleCollection),
     collectionNames
   );
 
@@ -2992,7 +2993,7 @@ if (isMain) {
         console.error("Usage: qmd search [options] <query>");
         process.exit(1);
       }
-      search(cli.query, cli.opts);
+      await search(cli.query, cli.opts);
       break;
 
     case "vsearch":

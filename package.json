@@ -46,8 +46,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "better-sqlite3": "^12.4.5",
+    "better-sqlite3": "^12.8.0",
     "fast-glob": "^3.3.0",
+    "kiwi-nlp": "^0.22.1",
     "node-llama-cpp": "^3.17.1",
     "picomatch": "^4.0.0",
     "sqlite-vec": "^0.1.7-alpha.2",

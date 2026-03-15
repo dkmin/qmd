@@ -778,6 +778,16 @@ function initializeDatabase(db: Database): void {
       WHERE new.active = 1;
     END
   `);
+
+  // Korean FTS5 table — populated by application code (not triggers)
+  // using Kiwi morphological analyzer for tokenization.
+  // filepath: raw path (not tokenized), title/body: Kiwi-tokenized text.
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts_ko USING fts5(
+      filepath, title, body,
+      tokenize='unicode61'
+    )
+  `);
 }
 
 // =============================================================================
@@ -1636,7 +1646,7 @@ export function handelize(path: string): string {
  */
 export type SearchResult = DocumentResult & {
   score: number;              // Relevance score (0-1)
-  source: "fts" | "vec";      // Search source (full-text or vector)
+  source: "fts" | "vec" | "fts-ko";      // Search source (full-text, vector, or Korean FTS)
   chunkPos?: number;          // Character position of matching chunk (for vector search)
 };
 
@@ -1653,7 +1663,7 @@ export type RankedResult = {
 
 export type RRFContributionTrace = {
   listIndex: number;
-  source: "fts" | "vec";
+  source: "fts" | "vec" | "fts-ko";
   queryType: "original" | "lex" | "vec" | "hyde";
   query: string;
   rank: number;            // 1-indexed rank within list
@@ -1956,6 +1966,41 @@ export function insertDocument(
       modified_at = excluded.modified_at,
       active = 1
   `).run(collectionName, path, title, hash, createdAt, modifiedAt);
+}
+
+/**
+ * Insert Kiwi-tokenized document into Korean FTS table.
+ * Call this after insertDocument() for Korean content.
+ * Degrades gracefully if Kiwi is unavailable (no-op).
+ */
+export async function insertDocumentKo(
+  db: Database,
+  collectionName: string,
+  path: string,
+  title: string,
+  body: string
+): Promise<void> {
+  const { tokenizeKo } = await import("./kiwi.js");
+  const tokenizedTitle = await tokenizeKo(title);
+  const tokenizedBody = await tokenizeKo(body);
+
+  const doc = db.prepare(
+    `SELECT id FROM documents WHERE collection = ? AND path = ? AND active = 1`
+  ).get(collectionName, path) as { id: number } | undefined;
+
+  if (!doc) return;
+
+  db.prepare(`DELETE FROM documents_fts_ko WHERE rowid = ?`).run(doc.id);
+  db.prepare(
+    `INSERT INTO documents_fts_ko(rowid, filepath, title, body) VALUES (?, ?, ?, ?)`
+  ).run(doc.id, collectionName + '/' + path, tokenizedTitle, tokenizedBody);
+}
+
+/**
+ * Delete document from Korean FTS table.
+ */
+export function deleteDocumentKo(db: Database, docId: number): void {
+  db.prepare(`DELETE FROM documents_fts_ko WHERE rowid = ?`).run(docId);
 }
 
 /**
@@ -2810,6 +2855,162 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
       score,
       source: "fts" as const,
     };
+  });
+}
+
+// =============================================================================
+// Korean FTS Search
+// =============================================================================
+
+/**
+ * Build FTS5 query for Korean-tokenized content.
+ * Uses OR for all tokens (morpheme + original) so BM25 naturally
+ * ranks documents matching more terms higher.
+ * Restricts search to title and body columns (not filepath).
+ */
+function buildFTS5QueryKo(
+  morphemeTokens: string[],
+  originalTokens: string[]
+): string | null {
+  const negative: string[] = [];
+  const allPositive = new Set<string>();
+
+  for (const t of morphemeTokens) {
+    if (t.startsWith("-")) {
+      const clean = t.slice(1);
+      if (clean) negative.push(`"${clean}"`);
+    } else if (t) {
+      allPositive.add(t);
+    }
+  }
+  for (const t of originalTokens) {
+    if (t && !t.startsWith("-")) allPositive.add(t);
+  }
+
+  if (allPositive.size === 0) return null;
+
+  // Column filter: search only title and body, not filepath
+  const quoted = [...allPositive].map(t => `"${t}"`);
+  let result = `{title body} : ${quoted.join(" OR ")}`;
+  for (const neg of negative) {
+    result = `(${result}) NOT ${neg}`;
+  }
+  return result;
+}
+
+/**
+ * Search Korean FTS table with Kiwi-tokenized query.
+ * Returns SearchResult[] with source="fts-ko".
+ */
+export async function searchFTSKo(
+  db: Database,
+  query: string,
+  limit: number = 20,
+  collectionName?: string
+): Promise<SearchResult[]> {
+  // Check if table has data first (avoid loading Kiwi unnecessarily)
+  const hasData = db.prepare(
+    `SELECT COUNT(*) as cnt FROM documents_fts_ko`
+  ).get() as { cnt: number };
+  if (hasData.cnt === 0) return [];
+
+  const { tokenizeKo, isKiwiAvailable } = await import("./kiwi.js");
+  if (!isKiwiAvailable()) {
+    await tokenizeKo("init");
+    if (!isKiwiAvailable()) return [];
+  }
+
+  // Separate morpheme tokens (AND) from original tokens (OR fallback)
+  const morphemes = await tokenizeKo(query);
+  const morphemeTokens = morphemes.trim().split(/\s+/).filter((t: string) => t.length > 0);
+  const originalTokens = query.trim().split(/\s+/).filter(t => t.length > 0);
+  const ftsQuery = buildFTS5QueryKo(morphemeTokens, originalTokens);
+  if (!ftsQuery) return [];
+
+  let sql = `
+    SELECT
+      'qmd://' || d.collection || '/' || d.path as filepath,
+      d.collection || '/' || d.path as display_path,
+      d.title,
+      content.doc as body,
+      d.hash,
+      bm25(documents_fts_ko, 0.0, 10.0, 1.0) as bm25_score
+    FROM documents_fts_ko f
+    JOIN documents d ON d.id = f.rowid
+    JOIN content ON content.hash = d.hash
+    WHERE documents_fts_ko MATCH ? AND d.active = 1
+  `;
+  const params: (string | number)[] = [ftsQuery];
+
+  if (collectionName) {
+    sql += ` AND d.collection = ?`;
+    params.push(String(collectionName));
+  }
+
+  sql += ` ORDER BY bm25_score ASC LIMIT ?`;
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as {
+    filepath: string; display_path: string; title: string;
+    body: string; hash: string; bm25_score: number;
+  }[];
+
+  return rows.map(row => {
+    const collName = row.filepath.split('//')[1]?.split('/')[0] || "";
+    const score = Math.abs(row.bm25_score) / (1 + Math.abs(row.bm25_score));
+    return {
+      filepath: row.filepath,
+      displayPath: row.display_path,
+      title: row.title,
+      hash: row.hash,
+      docid: getDocid(row.hash),
+      collectionName: collName,
+      modifiedAt: "",
+      bodyLength: row.body.length,
+      body: row.body,
+      context: getContextForFile(db, row.filepath),
+      score,
+      source: "fts-ko" as const,
+    };
+  });
+}
+
+/**
+ * Search both English and Korean FTS tables, merge via RRF.
+ */
+export async function searchFTSMerged(
+  db: Database,
+  query: string,
+  limit: number = 20,
+  collectionName?: string
+): Promise<SearchResult[]> {
+  const enResults = searchFTS(db, query, limit, collectionName);
+  const koResults = await searchFTSKo(db, query, limit, collectionName);
+
+  if (koResults.length === 0) return enResults;
+  if (enResults.length === 0) return koResults;
+
+  const toRanked = (r: SearchResult): RankedResult => ({
+    file: r.filepath,
+    displayPath: r.displayPath,
+    title: r.title,
+    body: r.body || "",
+    score: r.score,
+  });
+
+  const fused = reciprocalRankFusion([
+    enResults.map(toRanked),
+    koResults.map(toRanked),
+  ]);
+
+  const resultMap = new Map<string, SearchResult>();
+  for (const r of [...enResults, ...koResults]) {
+    if (!resultMap.has(r.filepath)) resultMap.set(r.filepath, r);
+  }
+
+  return fused.slice(0, limit).map(f => {
+    const original = resultMap.get(f.file)!;
+    return { ...original, score: f.score };
   });
 }
 
@@ -3691,7 +3892,7 @@ export interface HybridQueryResult {
 }
 
 export type RankedListMeta = {
-  source: "fts" | "vec";
+  source: "fts" | "vec" | "fts-ko";
   queryType: "original" | "lex" | "vec" | "hyde";
   query: string;
 };
@@ -3761,6 +3962,17 @@ export async function hybridQuery(
       title: r.title, body: r.body || "", score: r.score,
     })));
     rankedListMeta.push({ source: "fts", queryType: "original", query });
+  }
+
+  // Korean FTS — additional ranked list for Korean content
+  const koResults = await searchFTSKo(store.db, query, 20, collection);
+  if (koResults.length > 0) {
+    for (const r of koResults) docidMap.set(r.filepath, r.docid);
+    rankedLists.push(koResults.map(r => ({
+      file: r.filepath, displayPath: r.displayPath,
+      title: r.title, body: r.body || "", score: r.score,
+    })));
+    rankedListMeta.push({ source: "fts-ko", queryType: "original", query });
   }
 
   // Step 3: Route searches by query type
