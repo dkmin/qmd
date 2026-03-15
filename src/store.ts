@@ -3009,7 +3009,7 @@ export async function searchFTSMerged(
     koResults.map(toRanked),
   ]);
 
-  // Track which sources each doc appeared in and best original score
+  // Track which sources each doc appeared in with individual scores
   const enMap = new Map(enResults.map(r => [r.filepath, r]));
   const koMap = new Map(koResults.map(r => [r.filepath, r]));
 
@@ -3017,12 +3017,11 @@ export async function searchFTSMerged(
     const enResult = enMap.get(f.file);
     const koResult = koMap.get(f.file);
     const original = enResult || koResult!;
-    const sources: string[] = [];
-    if (enResult) sources.push("fts");
-    if (koResult) sources.push("fts-ko");
-    // Use max original score (not raw RRF score) for display
+    const parts: string[] = [];
+    if (enResult) parts.push(`fts:${Math.round(enResult.score * 100)}%`);
+    if (koResult) parts.push(`fts-ko:${Math.round(koResult.score * 100)}%`);
     const bestScore = Math.max(enResult?.score ?? 0, koResult?.score ?? 0);
-    return { ...original, score: bestScore, source: sources.join("+") as any };
+    return { ...original, score: bestScore, source: parts.join(" ") as any };
   });
 }
 
